@@ -1,0 +1,12 @@
+{
+  "name": "Quick Share",
+  "description": "Android Quick Share toggle and status indicator for GNOME Quick Settings",
+  "uuid": "quickshare@niksanand1717.github.com",
+  "shell-version": [
+    "45",
+    "46",
+    "47"
+  ],
+  "url": "https://github.com/niksanand1717/gnome-quick-share",
+  "version": 1
+}

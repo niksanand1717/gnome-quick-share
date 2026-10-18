@@ -90,24 +90,14 @@ async fn main() -> Result<(), anyhow::Error> {
                         
                         let mut st = state_clone.lock().unwrap();
                         st.state = "receiving".to_string();
-                        st.device = dev.clone();
-                        st.file = fname.clone();
+                        st.device = dev;
+                        st.file = fname;
                         st.total_bytes = meta.total_bytes;
                         st.received_bytes = 0;
                         st.progress = 0;
                         last_instant = Instant::now();
                         last_ack = 0;
                         save_status(&st);
-
-                        // Single initial notification with low urgency
-                        let _ = Command::new("notify-send")
-                            .args([
-                                "-i", "send-to-symbolic",
-                                "-u", "low",
-                                "Quick Share",
-                                &format!("Receiving from {}: {}", dev, fname)
-                            ])
-                            .spawn();
                     }
                 }
                 Some(State::ReceivingFiles) => {
@@ -136,10 +126,10 @@ async fn main() -> Result<(), anyhow::Error> {
                         st.total_bytes = meta.total_bytes;
                         st.progress = percent.min(100);
                         if !speed_str.is_empty() {
-                            st.speed = speed_str.clone();
+                            st.speed = speed_str;
                         }
-                        // Updates status file in RAM for the GNOME Quick Settings UI
-                        // NO notification popups are sent in a loop during the transfer
+                        // Purely updates RAM status for the GNOME extension UI
+                        // ZERO notify-send calls here!
                         save_status(&st);
                     }
                 }
@@ -151,7 +141,7 @@ async fn main() -> Result<(), anyhow::Error> {
                     st.last_file = last.clone();
                     save_status(&st);
 
-                    // Single completion notification
+                    // Single completion notification ONLY
                     let _ = Command::new("notify-send")
                         .args([
                             "-i", "send-to-symbolic",
@@ -167,7 +157,7 @@ async fn main() -> Result<(), anyhow::Error> {
         }
     });
 
-    info!("Quick Share Daemon running. Ready for transfers.");
+    info!("Quick Share Daemon running (completely silent). Ready for transfers.");
     let _ = tokio::signal::ctrl_c().await;
     info!("Stopping service.");
     let _ = fs::remove_file(get_status_path());

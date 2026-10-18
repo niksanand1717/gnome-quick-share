@@ -3,6 +3,7 @@
  * Quick Share GNOME Shell Extension
  * Direct Quick Share integration with in-UI Progress Bar and Desktop Notifications
  * Zero external web server. Pure native desktop integration.
+ * Event-driven via Gio.FileMonitor. Zero main-thread polling.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -19,13 +20,42 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import { QuickMenuToggle, SystemIndicator } from 'resource:///org/gnome/shell/ui/quickSettings.js';
 
-const DAEMON_PATH = `${GLib.get_home_dir()}/.local/bin/quickshare-daemon`;
 const DOWNLOADS_PATH = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DOWNLOAD) || `${GLib.get_home_dir()}/Downloads`;
 const STATUS_PATH = `${GLib.get_user_runtime_dir()}/quickshare.json`;
 
+function findDaemonBinary(extensionPath) {
+    if (extensionPath) {
+        const bundled = Gio.File.new_for_path(`${extensionPath}/bin/quickshare-daemon`);
+        if (bundled.query_exists(null)) return bundled.get_path();
+    }
+    const userLocal = Gio.File.new_for_path(`${GLib.get_home_dir()}/.local/bin/quickshare-daemon`);
+    if (userLocal.query_exists(null)) return userLocal.get_path();
+
+    const inPath = GLib.find_program_in_path('quickshare-daemon');
+    if (inPath) return inPath;
+
+    return userLocal.get_path();
+}
+
+function isPidAlive(pid) {
+    if (!pid || pid <= 0) return false;
+    try {
+        const procDir = Gio.File.new_for_path(`/proc/${pid}`);
+        if (!procDir.query_exists(null)) return false;
+        const cmdFile = Gio.File.new_for_path(`/proc/${pid}/cmdline`);
+        if (!cmdFile.query_exists(null)) return false;
+        const [ok, bytes] = cmdFile.load_contents(null);
+        if (!ok || !bytes) return false;
+        const cmd = new TextDecoder('utf-8').decode(bytes);
+        return cmd.includes('quickshare-daemon') || cmd.includes('core_bin');
+    } catch (e) {
+        return false;
+    }
+}
+
 const QuickShareToggle = GObject.registerClass(
 class QuickShareToggle extends QuickMenuToggle {
-    _init(indicator) {
+    _init(indicator, extensionPath) {
         super._init({
             title: _('Quick Share'),
             subtitle: _('Checking...'),
@@ -34,6 +64,9 @@ class QuickShareToggle extends QuickMenuToggle {
         });
 
         this._indicator = indicator;
+        this._daemonPath = findDaemonBinary(extensionPath);
+        this._daemonProc = null;
+        this._currentProgress = 0;
         this._hostName = GLib.get_host_name();
 
         // Setup menu header
@@ -86,6 +119,11 @@ class QuickShareToggle extends QuickMenuToggle {
         this._barBg.add_child(this._barFill);
         this._progressBox.add_child(this._barBg);
 
+        // Responsive width recalculation on allocation / layout resize
+        this._allocId = this._barBg.connect('notify::allocation', () => {
+            this._updateFillBar(this._currentProgress);
+        });
+
         // Line 3: Transfer speed and size
         this._detailsLabel = new St.Label({
             text: '',
@@ -112,7 +150,7 @@ class QuickShareToggle extends QuickMenuToggle {
                     null
                 );
             } catch (e) {
-                log(`QuickShare: Failed to open Downloads: ${e.message}`);
+                console.error(`QuickShare: Failed to open Downloads: ${e.message}`);
             }
         });
         this.menu.addMenuItem(openDownloadsItem);
@@ -122,9 +160,34 @@ class QuickShareToggle extends QuickMenuToggle {
             this._toggleService();
         });
 
-        // Sync initially and start poller
-        this._sync();
-        this._startPoller();
+        // Setup event-driven File Monitor on user runtime directory (Zero-Polling)
+        this._setupFileMonitor();
+
+        // Initial state sync
+        this._syncState();
+    }
+
+    _updateFillBar(percent) {
+        this._currentProgress = percent;
+        const alloc = this._barBg.get_allocation_box();
+        const availableWidth = alloc ? (alloc.x2 - alloc.x1) : 0;
+        const totalWidth = availableWidth > 0 ? availableWidth : (this._barBg.get_width() || 240);
+        const fillWidth = Math.max(4, Math.round(((percent || 0) / 100) * totalWidth));
+        this._barFill.set_width(fillWidth);
+    }
+
+    _setupFileMonitor() {
+        try {
+            const runDir = Gio.File.new_for_path(GLib.get_user_runtime_dir());
+            this._dirMonitor = runDir.monitor_directory(Gio.FileMonitorFlags.NONE, null);
+            this._dirMonitorId = this._dirMonitor.connect('changed', (mon, file, otherFile, eventType) => {
+                if (file.get_basename() === 'quickshare.json') {
+                    this._syncState();
+                }
+            });
+        } catch (e) {
+            console.error(`QuickShare: Failed to setup directory monitor: ${e.message}`);
+        }
     }
 
     _toggleService() {
@@ -139,26 +202,39 @@ class QuickShareToggle extends QuickMenuToggle {
 
     _launchDaemon() {
         try {
-            Gio.Subprocess.new([DAEMON_PATH], Gio.SubprocessFlags.NONE);
+            this._daemonProc = new Gio.Subprocess({
+                argv: [this._daemonPath],
+                flags: Gio.SubprocessFlags.NONE,
+            });
+            this._daemonProc.init(null);
+            this._daemonProc.wait_async(null, (proc, res) => {
+                try {
+                    proc.wait_finish(res);
+                } catch (e) {
+                    // Ignore normal exit
+                }
+                this._daemonProc = null;
+                this._syncState();
+            });
         } catch (e) {
-            log(`QuickShare: Error launching daemon: ${e.message}`);
+            console.error(`QuickShare: Error launching daemon: ${e.message}`);
+            this._syncState();
         }
     }
 
     _stopDaemon() {
         try {
-            Gio.Subprocess.new(['pkill', '-f', 'quickshare-daemon'], Gio.SubprocessFlags.NONE);
+            if (this._daemonProc) {
+                this._daemonProc.send_signal(15); // SIGTERM
+                this._daemonProc = null;
+            } else {
+                const data = this._readStatusFile();
+                if (data && data.pid && isPidAlive(data.pid)) {
+                    GLib.spawn_command_line_async(`kill -15 ${data.pid}`);
+                }
+            }
         } catch (e) {
-            log(`QuickShare: Error stopping daemon: ${e.message}`);
-        }
-    }
-
-    _isDaemonRunning() {
-        try {
-            const [ok, out, err, status] = GLib.spawn_command_line_sync('pgrep -f quickshare-daemon');
-            return ok && status === 0 && out.length > 0;
-        } catch (e) {
-            return false;
+            console.error(`QuickShare: Error stopping daemon: ${e.message}`);
         }
     }
 
@@ -176,8 +252,20 @@ class QuickShareToggle extends QuickMenuToggle {
         }
     }
 
-    _sync() {
-        const isRunning = this._isDaemonRunning();
+    _isDaemonRunning(statusData) {
+        if (this._daemonProc) {
+            return true;
+        }
+        if (statusData && statusData.pid) {
+            return isPidAlive(statusData.pid);
+        }
+        return false;
+    }
+
+    _syncState() {
+        const data = this._readStatusFile();
+        const isRunning = this._isDaemonRunning(data);
+
         this.checked = isRunning;
         this._indicator.updateVisible(isRunning);
 
@@ -188,7 +276,6 @@ class QuickShareToggle extends QuickMenuToggle {
             return;
         }
 
-        const data = this._readStatusFile();
         if (data && data.state === 'receiving') {
             const p = data.progress || 0;
             const speed = data.speed ? ` • ${data.speed}` : '';
@@ -199,11 +286,7 @@ class QuickShareToggle extends QuickMenuToggle {
             this._percentLabel.text = `${p}%`;
             this._detailsLabel.text = data.speed ? `${data.speed}` : '';
 
-            // Update in-UI progress bar width
-            const totalWidth = this._barBg.get_width() || 240;
-            const fillWidth = Math.max(4, Math.round((p / 100) * totalWidth));
-            this._barFill.set_width(fillWidth);
-
+            this._updateFillBar(p);
             this._progressMenuItem.actor.show();
         } else if (data && data.state === 'finished' && data.last_file) {
             this.subtitle = _('Visible');
@@ -211,8 +294,7 @@ class QuickShareToggle extends QuickMenuToggle {
             this._fileNameLabel.text = `✓ ${data.last_file}`;
             this._percentLabel.text = '100%';
             this._detailsLabel.text = _('Saved to Downloads');
-            const totalWidth = this._barBg.get_width() || 240;
-            this._barFill.set_width(totalWidth);
+            this._updateFillBar(100);
             this._progressMenuItem.actor.show();
         } else {
             this.subtitle = _('Visible');
@@ -221,17 +303,18 @@ class QuickShareToggle extends QuickMenuToggle {
         }
     }
 
-    _startPoller() {
-        this._timeout = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, () => {
-            this._sync();
-            return GLib.SOURCE_CONTINUE;
-        });
-    }
-
     destroy() {
-        if (this._timeout) {
-            GLib.source_remove(this._timeout);
-            this._timeout = null;
+        if (this._allocId && this._barBg) {
+            this._barBg.disconnect(this._allocId);
+            this._allocId = null;
+        }
+        if (this._dirMonitor) {
+            if (this._dirMonitorId) {
+                this._dirMonitor.disconnect(this._dirMonitorId);
+                this._dirMonitorId = null;
+            }
+            this._dirMonitor.cancel();
+            this._dirMonitor = null;
         }
         super.destroy();
     }
@@ -239,14 +322,14 @@ class QuickShareToggle extends QuickMenuToggle {
 
 const QuickShareIndicator = GObject.registerClass(
 class QuickShareIndicator extends SystemIndicator {
-    _init() {
+    _init(extensionPath) {
         super._init();
 
         this._icon = this._addIndicator();
         this._icon.icon_name = 'send-to-symbolic';
         this._icon.visible = false;
 
-        this.quickToggle = new QuickShareToggle(this);
+        this.quickToggle = new QuickShareToggle(this, extensionPath);
         this.quickSettingsItems.push(this.quickToggle);
     }
 
@@ -267,7 +350,8 @@ class QuickShareIndicator extends SystemIndicator {
 
 export default class QuickShareExtension extends Extension {
     enable() {
-        this._indicator = new QuickShareIndicator();
+        this.initTranslations();
+        this._indicator = new QuickShareIndicator(this.path);
         Main.panel.statusArea.quickSettings.addExternalIndicator(this._indicator);
     }
 

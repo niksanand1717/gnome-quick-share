@@ -22,6 +22,7 @@ struct TransferInfo {
     progress: u8,
     speed: String,
     last_file: String,
+    pid: u32,
 }
 
 fn get_status_path() -> PathBuf {
@@ -52,12 +53,15 @@ async fn main() -> Result<(), anyhow::Error> {
     let discovery_channel = broadcast::channel(10);
     let _ = rqs.discovery(discovery_channel.0);
 
+    let my_pid = std::process::id();
     let state = Arc::new(Mutex::new(TransferInfo {
         state: "idle".to_string(),
+        pid: my_pid,
         ..Default::default()
     }));
     save_status(&TransferInfo {
         state: "idle".to_string(),
+        pid: my_pid,
         ..Default::default()
     });
 
@@ -86,7 +90,13 @@ async fn main() -> Result<(), anyhow::Error> {
 
                     if let Some(meta) = &msg.meta {
                         let dev = meta.source.as_ref().map(|s| s.name.clone()).unwrap_or_else(|| "Android Device".to_string());
-                        let fname = meta.files.as_ref().and_then(|f| f.first()).cloned().unwrap_or_else(|| "File".to_string());
+                        let raw_fname = meta.files.as_ref().and_then(|f| f.first()).cloned().unwrap_or_else(|| "File".to_string());
+                        // Sanitize filename to prevent directory traversal
+                        let fname = std::path::Path::new(&raw_fname)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("File")
+                            .to_string();
                         
                         let mut st = state_clone.lock().unwrap();
                         st.state = "receiving".to_string();
@@ -95,6 +105,7 @@ async fn main() -> Result<(), anyhow::Error> {
                         st.total_bytes = meta.total_bytes;
                         st.received_bytes = 0;
                         st.progress = 0;
+                        st.pid = my_pid;
                         last_instant = Instant::now();
                         last_ack = 0;
                         save_status(&st);
@@ -177,8 +188,25 @@ async fn main() -> Result<(), anyhow::Error> {
     });
 
     info!("Quick Share Daemon running (1 start + 1 finish notification). Ready for transfers.");
-    let _ = tokio::signal::ctrl_c().await;
-    info!("Stopping service.");
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate())?;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("Received SIGINT signal.");
+            }
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM signal.");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+
+    info!("Stopping service cleanly.");
     let _ = fs::remove_file(get_status_path());
     rqs.stop().await;
 

@@ -22,6 +22,7 @@ struct TransferInfo {
     progress: u8,
     speed: String,
     last_file: String,
+    pid: u32,
 }
 
 fn get_status_path() -> PathBuf {
@@ -32,6 +33,19 @@ fn get_status_path() -> PathBuf {
 fn save_status(info: &TransferInfo) {
     if let Ok(json) = serde_json::to_string(info) {
         let _ = fs::write(get_status_path(), json);
+    }
+}
+
+fn sanitize_filename(raw: &str) -> String {
+    let clean = std::path::Path::new(raw)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.trim())
+        .unwrap_or("");
+    if clean.is_empty() {
+        "File".to_string()
+    } else {
+        clean.to_string()
     }
 }
 
@@ -52,12 +66,15 @@ async fn main() -> Result<(), anyhow::Error> {
     let discovery_channel = broadcast::channel(10);
     let _ = rqs.discovery(discovery_channel.0);
 
+    let my_pid = std::process::id();
     let state = Arc::new(Mutex::new(TransferInfo {
         state: "idle".to_string(),
+        pid: my_pid,
         ..Default::default()
     }));
     save_status(&TransferInfo {
         state: "idle".to_string(),
+        pid: my_pid,
         ..Default::default()
     });
 
@@ -86,7 +103,8 @@ async fn main() -> Result<(), anyhow::Error> {
 
                     if let Some(meta) = &msg.meta {
                         let dev = meta.source.as_ref().map(|s| s.name.clone()).unwrap_or_else(|| "Android Device".to_string());
-                        let fname = meta.files.as_ref().and_then(|f| f.first()).cloned().unwrap_or_else(|| "File".to_string());
+                        let raw_fname = meta.files.as_ref().and_then(|f| f.first()).cloned().unwrap_or_else(|| "File".to_string());
+                        let fname = sanitize_filename(&raw_fname);
                         
                         let mut st = state_clone.lock().unwrap();
                         st.state = "receiving".to_string();
@@ -95,6 +113,7 @@ async fn main() -> Result<(), anyhow::Error> {
                         st.total_bytes = meta.total_bytes;
                         st.received_bytes = 0;
                         st.progress = 0;
+                        st.pid = my_pid;
                         last_instant = Instant::now();
                         last_ack = 0;
                         save_status(&st);
@@ -177,10 +196,61 @@ async fn main() -> Result<(), anyhow::Error> {
     });
 
     info!("Quick Share Daemon running (1 start + 1 finish notification). Ready for transfers.");
-    let _ = tokio::signal::ctrl_c().await;
-    info!("Stopping service.");
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate())?;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("Received SIGINT signal.");
+            }
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM signal.");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+
+    info!("Stopping service cleanly.");
     let _ = fs::remove_file(get_status_path());
     rqs.stop().await;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_filename_traversal() {
+        assert_eq!(sanitize_filename("../../etc/shadow"), "shadow");
+        assert_eq!(sanitize_filename("/var/tmp/bad.sh"), "bad.sh");
+        assert_eq!(sanitize_filename("safe_file.png"), "safe_file.png");
+        assert_eq!(sanitize_filename(""), "File");
+        assert_eq!(sanitize_filename("   "), "File");
+    }
+
+    #[test]
+    fn test_transfer_info_serialization() {
+        let info = TransferInfo {
+            state: "receiving".to_string(),
+            device: "Galaxy A54".to_string(),
+            file: "video.mp4".to_string(),
+            total_bytes: 1000,
+            received_bytes: 500,
+            progress: 50,
+            speed: "12.5 MB/s".to_string(),
+            last_file: String::new(),
+            pid: 12345,
+        };
+        let json = serde_json::to_string(&info).expect("Failed to serialize");
+        assert!(json.contains("\"pid\":12345"));
+        assert!(json.contains("\"progress\":50"));
+        assert!(json.contains("\"state\":\"receiving\""));
+        assert!(json.contains("\"device\":\"Galaxy A54\""));
+    }
 }

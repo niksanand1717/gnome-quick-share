@@ -1,8 +1,8 @@
 /* extension.js
  *
  * Quick Share GNOME Shell Extension
- * Connects Android Quick Share to GNOME Quick Settings
- * Uses self-contained standalone server on unusual port 45103
+ * Controls standalone Quick Share daemon built directly from rqs_lib
+ * Unusual port: 45103
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -19,7 +19,7 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import { QuickMenuToggle, SystemIndicator } from 'resource:///org/gnome/shell/ui/quickSettings.js';
 
 const PORT = 45103;
-const SERVER_PATH = `${GLib.get_home_dir()}/.local/bin/quickshare-server`;
+const DAEMON_PATH = `${GLib.get_home_dir()}/.local/bin/quickshare-daemon`;
 const DOWNLOADS_PATH = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DOWNLOAD) || `${GLib.get_home_dir()}/Downloads`;
 
 const QuickShareToggle = GObject.registerClass(
@@ -57,8 +57,8 @@ class QuickShareToggle extends QuickMenuToggle {
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
-        // Action: Show QR Code & Web UI
-        const openDashboardItem = new PopupMenu.PopupMenuItem(_('Show QR Code & Dashboard'));
+        // Action: Show Web UI
+        const openDashboardItem = new PopupMenu.PopupMenuItem(_('Open Web Dashboard'));
         openDashboardItem.connect('activate', () => {
             try {
                 Gio.AppInfo.launch_default_for_uri(`http://localhost:${PORT}`, null);
@@ -95,32 +95,32 @@ class QuickShareToggle extends QuickMenuToggle {
     _toggleService() {
         if (this.checked) {
             this.subtitle = _('Starting...');
-            this._launchServer();
+            this._launchDaemon();
         } else {
             this.subtitle = _('Stopping...');
-            this._stopServer();
+            this._stopDaemon();
         }
     }
 
-    _launchServer() {
+    _launchDaemon() {
         try {
-            Gio.Subprocess.new(['python3', SERVER_PATH], Gio.SubprocessFlags.NONE);
+            Gio.Subprocess.new([DAEMON_PATH], Gio.SubprocessFlags.NONE);
         } catch (e) {
-            log(`QuickShare: Error launching server: ${e.message}`);
+            log(`QuickShare: Error launching daemon: ${e.message}`);
         }
     }
 
-    _stopServer() {
+    _stopDaemon() {
         try {
-            Gio.Subprocess.new(['pkill', '-f', 'quickshare-server'], Gio.SubprocessFlags.NONE);
+            Gio.Subprocess.new(['pkill', '-f', 'quickshare-daemon'], Gio.SubprocessFlags.NONE);
         } catch (e) {
-            log(`QuickShare: Error stopping server: ${e.message}`);
+            log(`QuickShare: Error stopping daemon: ${e.message}`);
         }
     }
 
-    _isServerRunning() {
+    _isDaemonRunning() {
         try {
-            const [ok, out, err, status] = GLib.spawn_command_line_sync('pgrep -f quickshare-server');
+            const [ok, out, err, status] = GLib.spawn_command_line_sync('pgrep -f quickshare-daemon');
             return ok && status === 0 && out.length > 0;
         } catch (e) {
             return false;
@@ -140,31 +140,39 @@ class QuickShareToggle extends QuickMenuToggle {
     }
 
     _sync() {
-        const isRunning = this._isServerRunning();
+        const isRunning = this._isDaemonRunning();
         this.checked = isRunning;
         this._indicator.updateVisible(isRunning);
 
         if (!isRunning) {
             this.subtitle = _('Off');
-            this._statusItem.label.text = _('Server is stopped');
+            this._statusItem.label.text = _('Quick Share is disabled');
             this._transferItem.actor.hide();
             return;
         }
 
         const data = this._checkStatusJson();
         if (data && data.state === 'receiving') {
-            this.subtitle = _(`Receiving ${data.progress}% (${data.speed})`);
-            this._statusItem.label.text = _(`Receiving: ${data.file_name} (${data.speed})`);
-            this._transferItem.label.text = `⚡ ${data.progress}%`;
-            this._transferItem.actor.show();
+            const speed = data.speed ? ` (${data.speed})` : '';
+            this.subtitle = _(`Receiving ${data.progress}%${speed}`);
+            const dev = data.device ? ` from ${data.device}` : '';
+            this._statusItem.label.text = _(`Receiving${dev}... (${data.progress}%)`);
+            if (data.files && data.files.length > 0) {
+                const fname = data.files[0];
+                const shortFile = fname.length > 25 ? fname.substring(0, 22) + '...' : fname;
+                this._transferItem.label.text = `📄 ${shortFile}`;
+                this._transferItem.actor.show();
+            }
         } else if (data && data.state === 'finished' && data.last_file) {
-            this.subtitle = _('Ready (:45103)');
+            this.subtitle = _('Active (:45103)');
             this._statusItem.label.text = _(`Listening on unusual port ${PORT}`);
-            this._transferItem.label.text = `✓ Received: ${data.last_file}`;
+            const fname = data.last_file;
+            const shortFile = fname.length > 25 ? fname.substring(0, 22) + '...' : fname;
+            this._transferItem.label.text = `✓ Received: ${shortFile}`;
             this._transferItem.actor.show();
         } else {
-            this.subtitle = _('Ready (:45103)');
-            this._statusItem.label.text = _(`Listening on unusual port ${PORT}`);
+            this.subtitle = _('Active (:45103)');
+            this._statusItem.label.text = _(`Ready & Visible on port ${PORT}`);
             this._transferItem.actor.hide();
         }
     }

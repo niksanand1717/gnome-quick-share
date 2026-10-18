@@ -161,6 +161,16 @@ async fn main() -> Result<(), anyhow::Error> {
                         .spawn();
                     info!("Transfer finished successfully.");
                 }
+                Some(State::Cancelled) | Some(State::Disconnected) | Some(State::Rejected) => {
+                    let mut st = state_clone.lock().unwrap();
+                    if st.state == "receiving" {
+                        info!("Transfer ended ({:?}). Resetting state to idle.", msg.state);
+                        st.state = "idle".to_string();
+                        st.progress = 0;
+                        st.speed = String::new();
+                        save_status(&st);
+                    }
+                }
                 _ => {}
             }
         }

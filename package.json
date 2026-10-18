@@ -1,0 +1,18 @@
+{
+  "name": "gnome-quick-share",
+  "version": "1.0.0",
+  "description": "Android Quick Share toggle and status indicator for GNOME Quick Settings",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/test_extension.js",
+    "pack": "./pack.sh"
+  },
+  "keywords": [
+    "gnome-shell-extension",
+    "quick-share",
+    "nearby-share",
+    "android"
+  ],
+  "author": "Nikhil Anand",
+  "license": "GPL-2.0-or-later"
+}

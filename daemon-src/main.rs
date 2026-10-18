@@ -36,6 +36,19 @@ fn save_status(info: &TransferInfo) {
     }
 }
 
+fn sanitize_filename(raw: &str) -> String {
+    let clean = std::path::Path::new(raw)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.trim())
+        .unwrap_or("");
+    if clean.is_empty() {
+        "File".to_string()
+    } else {
+        clean.to_string()
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     if std::env::var("RUST_LOG").is_err() {
@@ -91,12 +104,7 @@ async fn main() -> Result<(), anyhow::Error> {
                     if let Some(meta) = &msg.meta {
                         let dev = meta.source.as_ref().map(|s| s.name.clone()).unwrap_or_else(|| "Android Device".to_string());
                         let raw_fname = meta.files.as_ref().and_then(|f| f.first()).cloned().unwrap_or_else(|| "File".to_string());
-                        // Sanitize filename to prevent directory traversal
-                        let fname = std::path::Path::new(&raw_fname)
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("File")
-                            .to_string();
+                        let fname = sanitize_filename(&raw_fname);
                         
                         let mut st = state_clone.lock().unwrap();
                         st.state = "receiving".to_string();
@@ -211,4 +219,38 @@ async fn main() -> Result<(), anyhow::Error> {
     rqs.stop().await;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_filename_traversal() {
+        assert_eq!(sanitize_filename("../../etc/shadow"), "shadow");
+        assert_eq!(sanitize_filename("/var/tmp/bad.sh"), "bad.sh");
+        assert_eq!(sanitize_filename("safe_file.png"), "safe_file.png");
+        assert_eq!(sanitize_filename(""), "File");
+        assert_eq!(sanitize_filename("   "), "File");
+    }
+
+    #[test]
+    fn test_transfer_info_serialization() {
+        let info = TransferInfo {
+            state: "receiving".to_string(),
+            device: "Galaxy A54".to_string(),
+            file: "video.mp4".to_string(),
+            total_bytes: 1000,
+            received_bytes: 500,
+            progress: 50,
+            speed: "12.5 MB/s".to_string(),
+            last_file: String::new(),
+            pid: 12345,
+        };
+        let json = serde_json::to_string(&info).expect("Failed to serialize");
+        assert!(json.contains("\"pid\":12345"));
+        assert!(json.contains("\"progress\":50"));
+        assert!(json.contains("\"state\":\"receiving\""));
+        assert!(json.contains("\"device\":\"Galaxy A54\""));
+    }
 }

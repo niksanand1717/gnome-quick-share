@@ -1,6 +1,29 @@
-/* Quick Share Extension Styles */
+/* Quick Share GNOME Extension Styles */
 
-.quick-share-status {
-    font-weight: 500;
-    padding: 4px 8px;
+.quick-share-progress-container {
+    padding: 6px 12px 10px;
+}
+
+.quick-share-progress-bg {
+    background-color: rgba(255, 255, 255, 0.15);
+    border-radius: 4px;
+    height: 8px;
+    margin: 8px 0 6px;
+}
+
+.quick-share-progress-fill {
+    background-color: #38bdf8;
+    border-radius: 4px;
+    height: 8px;
+}
+
+.quick-share-title-text {
+    font-weight: bold;
+    font-size: 0.95em;
+    color: #ffffff;
+}
+
+.quick-share-sub-text {
+    font-size: 0.85em;
+    color: rgba(255, 255, 255, 0.7);
 }

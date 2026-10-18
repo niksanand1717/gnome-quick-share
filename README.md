@@ -1,47 +1,29 @@
-# Quick Share for GNOME Shell & Android
+# Quick Share for GNOME Shell
 
-A lightweight, standalone file-sharing server running on an unusual port (`45103`) paired with a native **GNOME Quick Settings Extension**.
+A native **GNOME Quick Settings Extension** and standalone Quick Share daemon for seamless file transfers between Android and Ubuntu.
 
-Allows instant, full-speed Wi-Fi file transfers directly between any Android phone and Ubuntu without relying on heavy external AppImages or third-party binaries.
+Zero web servers. Zero open ports. 100% native desktop integration.
 
 ---
 
-## Architecture
+## Features
 
-- **Standalone Server (`quickshare-server.py`)**:
-  - Pure Python 3 standard library with zero external dependencies.
-  - Listens on unusual port **`45103`**.
-  - **Dual-mode interface**:
-    - **Desktop**: Displays an embedded offline QR code with direct IP & `.local` mDNS links.
-    - **Mobile**: Responsive, dark-mode file uploader supporting multi-file, 4K videos, and large file streaming directly to `~/Downloads`.
-  - Live transfer tracking (`/status` endpoint) with real-time transfer speed (MB/s) and desktop notifications (`notify-send`).
-- **GNOME Shell Extension (`quickshare@niksanand1717.github.com`)**:
-  - Plugs natively into GNOME 45 & 46+ Quick Settings (top-right menu).
-  - Toggles the server on/off with one click.
-  - Live status indicator with upload progress (`Receiving 85% (32 MB/s)`).
-  - One-click access to QR code dashboard and received files.
+- **In-UI Progress Bar**: Real-time progress bar right inside the GNOME Quick Settings menu showing file name, percentage, and transfer speed (MB/s).
+- **Native Notification Updates**: Live progress bar in GNOME's notification center (`int:value` progress hints) updated synchronously as files transfer.
+- **Server-Free Architecture**: No HTTP server, no open web ports, no browser required. Operates completely in-memory via user runtime directory (`tmpfs`).
+- **Direct Protocol Engine**: Native Rust daemon built directly from `rqs_lib` source handling Google Quick Share / Nearby Share protocol (Bluetooth Low Energy + mDNS + peer-to-peer TCP).
+- **Auto-Save**: Incoming files land directly in `~/Downloads` without prompting or delays.
 
 ---
 
 ## Quick Start
 
-### 1. Run Server Manually
+### 1. Run the Native Daemon
 ```bash
-python3 quickshare-server.py
-```
-Or use the installed command:
-```bash
-quickshare-server
+~/.local/bin/quickshare-daemon
 ```
 
-Open `http://localhost:45103` in your browser to view the pairing QR code.
-
-### 2. Install & Enable GNOME Shell Extension
-```bash
-mkdir -p ~/.local/share/gnome-shell/extensions/quickshare@niksanand1717.github.com
-cp metadata.json extension.js stylesheet.css ~/.local/share/gnome-shell/extensions/quickshare@niksanand1717.github.com/
-```
-Reload GNOME Shell (`Alt` + `F2`, type `r`, press `Enter`), then enable:
+### 2. Enable GNOME Shell Extension
 ```bash
 gnome-extensions enable quickshare@niksanand1717.github.com
 ```

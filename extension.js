@@ -2,6 +2,7 @@
  *
  * Quick Share GNOME Shell Extension
  * Connects Android Quick Share to GNOME Quick Settings
+ * Uses self-contained standalone server on unusual port 45103
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -17,8 +18,8 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import { QuickMenuToggle, SystemIndicator } from 'resource:///org/gnome/shell/ui/quickSettings.js';
 
-const APP_PATH = `${GLib.get_home_dir()}/.local/bin/r-quick-share.AppImage`;
-const LOG_PATH = `${GLib.get_home_dir()}/.local/share/dev.mandre.rquickshare/logs/RQuickShare.log`;
+const PORT = 45103;
+const SERVER_PATH = `${GLib.get_home_dir()}/.local/bin/quickshare-server`;
 const DOWNLOADS_PATH = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DOWNLOAD) || `${GLib.get_home_dir()}/Downloads`;
 
 const QuickShareToggle = GObject.registerClass(
@@ -37,11 +38,11 @@ class QuickShareToggle extends QuickMenuToggle {
         // Setup menu header
         this.menu.setHeader('send-to-symbolic', _('Quick Share'), this._hostName);
 
-        // Status section in menu
+        // Status section
         this._statusSection = new PopupMenu.PopupMenuSection();
         this.menu.addMenuItem(this._statusSection);
 
-        this._statusItem = new PopupMenu.PopupMenuItem(_('Ready for transfers'), {
+        this._statusItem = new PopupMenu.PopupMenuItem(_('Ready on port 45103'), {
             reactive: false,
             can_focus: false,
         });
@@ -55,6 +56,17 @@ class QuickShareToggle extends QuickMenuToggle {
         this._statusSection.addMenuItem(this._transferItem);
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+        // Action: Show QR Code & Web UI
+        const openDashboardItem = new PopupMenu.PopupMenuItem(_('Show QR Code & Dashboard'));
+        openDashboardItem.connect('activate', () => {
+            try {
+                Gio.AppInfo.launch_default_for_uri(`http://localhost:${PORT}`, null);
+            } catch (e) {
+                log(`QuickShare: Failed to open dashboard: ${e.message}`);
+            }
+        });
+        this.menu.addMenuItem(openDashboardItem);
 
         // Action: Open Downloads
         const openDownloadsItem = new PopupMenu.PopupMenuItem(_('Open Received Files'));
@@ -70,13 +82,6 @@ class QuickShareToggle extends QuickMenuToggle {
         });
         this.menu.addMenuItem(openDownloadsItem);
 
-        // Action: Open App Window
-        const openAppItem = new PopupMenu.PopupMenuItem(_('Open Quick Share App'));
-        openAppItem.connect('activate', () => {
-            this._launchApp();
-        });
-        this.menu.addMenuItem(openAppItem);
-
         // Toggle action
         this.connect('clicked', () => {
             this._toggleService();
@@ -90,117 +95,76 @@ class QuickShareToggle extends QuickMenuToggle {
     _toggleService() {
         if (this.checked) {
             this.subtitle = _('Starting...');
-            this._launchApp();
+            this._launchServer();
         } else {
             this.subtitle = _('Stopping...');
-            this._stopApp();
+            this._stopServer();
         }
     }
 
-    _launchApp() {
+    _launchServer() {
         try {
-            Gio.Subprocess.new([APP_PATH], Gio.SubprocessFlags.NONE);
+            Gio.Subprocess.new(['python3', SERVER_PATH], Gio.SubprocessFlags.NONE);
         } catch (e) {
-            log(`QuickShare: Error launching App: ${e.message}`);
+            log(`QuickShare: Error launching server: ${e.message}`);
         }
     }
 
-    _stopApp() {
+    _stopServer() {
         try {
-            Gio.Subprocess.new(['pkill', '-f', 'r-quick-share'], Gio.SubprocessFlags.NONE);
+            Gio.Subprocess.new(['pkill', '-f', 'quickshare-server'], Gio.SubprocessFlags.NONE);
         } catch (e) {
-            log(`QuickShare: Error stopping App: ${e.message}`);
+            log(`QuickShare: Error stopping server: ${e.message}`);
         }
     }
 
-    _isAppRunning() {
+    _isServerRunning() {
         try {
-            const [ok, out, err, status] = GLib.spawn_command_line_sync('pgrep -f r-quick-share');
+            const [ok, out, err, status] = GLib.spawn_command_line_sync('pgrep -f quickshare-server');
             return ok && status === 0 && out.length > 0;
         } catch (e) {
             return false;
         }
     }
 
-    _checkLogStatus() {
-        const file = Gio.File.new_for_path(LOG_PATH);
-        if (!file.query_exists(null)) {
-            return { state: 'Idle', device: '', file: '', progress: 0 };
-        }
-
+    _checkStatusJson() {
         try {
-            const [ok, out] = GLib.spawn_command_line_sync(`tail -n 25 "${LOG_PATH}"`);
-            if (!ok || !out) return { state: 'Idle', device: '', file: '', progress: 0 };
-            const content = new TextDecoder('utf-8').decode(out);
-            const lines = content.trim().split('\n');
-
-            for (let i = lines.length - 1; i >= 0; i--) {
-                const line = lines[i];
-                if (line.includes('state: Some(ReceivingFiles)')) {
-                    let device = '';
-                    let fileName = '';
-                    let progress = 0;
-                    const nameMatch = line.match(/name:\s*"([^"]+)"/);
-                    if (nameMatch) device = nameMatch[1];
-                    const fileMatch = line.match(/files:\s*Some\(\["([^"]+)"/);
-                    if (fileMatch) fileName = fileMatch[1];
-                    const totalMatch = line.match(/total_bytes:\s*(\d+)/);
-                    const ackMatch = line.match(/ack_bytes:\s*(\d+)/);
-                    if (totalMatch && ackMatch) {
-                        const total = parseInt(totalMatch[1]);
-                        const ack = parseInt(ackMatch[1]);
-                        if (total > 0) progress = Math.min(100, Math.round((ack / total) * 100));
-                    }
-                    return { state: 'Receiving', device, file: fileName, progress };
-                } else if (line.includes('state: Some(Finished)') || line.includes('Transfer finished')) {
-                    let device = '';
-                    let fileName = '';
-                    const nameMatch = line.match(/name:\s*"([^"]+)"/);
-                    if (nameMatch) device = nameMatch[1];
-                    const fileMatch = line.match(/files:\s*Some\(\["([^"]+)"/);
-                    if (fileMatch) fileName = fileMatch[1];
-                    return { state: 'Finished', device, file: fileName, progress: 100 };
-                }
-            }
+            const [ok, out] = GLib.spawn_command_line_sync(`curl -s --max-time 1 http://127.0.0.1:${PORT}/status`);
+            if (!ok || !out) return null;
+            const str = new TextDecoder('utf-8').decode(out).trim();
+            if (!str) return null;
+            return JSON.parse(str);
         } catch (e) {
-            // ignore
+            return null;
         }
-        return { state: 'Idle', device: '', file: '', progress: 0 };
     }
 
     _sync() {
-        const isRunning = this._isAppRunning();
+        const isRunning = this._isServerRunning();
         this.checked = isRunning;
         this._indicator.updateVisible(isRunning);
 
         if (!isRunning) {
             this.subtitle = _('Off');
-            this._statusItem.label.text = _('Quick Share is disabled');
+            this._statusItem.label.text = _('Server is stopped');
             this._transferItem.actor.hide();
             return;
         }
 
-        const status = this._checkLogStatus();
-        if (status.state === 'Receiving') {
-            const dev = status.device ? ` from ${status.device}` : '';
-            this.subtitle = _(`Receiving ${status.progress}%`);
-            this._statusItem.label.text = _(`Receiving${dev}... (${status.progress}%)`);
-            if (status.file) {
-                const shortFile = status.file.length > 28 ? status.file.substring(0, 25) + '...' : status.file;
-                this._transferItem.label.text = `📄 ${shortFile}`;
-                this._transferItem.actor.show();
-            }
-        } else if (status.state === 'Finished') {
-            this.subtitle = _('Visible');
-            this._statusItem.label.text = status.device ? _(`Connected: ${status.device}`) : _('Ready for transfers');
-            if (status.file) {
-                const shortFile = status.file.length > 28 ? status.file.substring(0, 25) + '...' : status.file;
-                this._transferItem.label.text = `✓ ${shortFile}`;
-                this._transferItem.actor.show();
-            }
+        const data = this._checkStatusJson();
+        if (data && data.state === 'receiving') {
+            this.subtitle = _(`Receiving ${data.progress}% (${data.speed})`);
+            this._statusItem.label.text = _(`Receiving: ${data.file_name} (${data.speed})`);
+            this._transferItem.label.text = `⚡ ${data.progress}%`;
+            this._transferItem.actor.show();
+        } else if (data && data.state === 'finished' && data.last_file) {
+            this.subtitle = _('Ready (:45103)');
+            this._statusItem.label.text = _(`Listening on unusual port ${PORT}`);
+            this._transferItem.label.text = `✓ Received: ${data.last_file}`;
+            this._transferItem.actor.show();
         } else {
-            this.subtitle = _('Visible');
-            this._statusItem.label.text = _('Ready for transfers (Visible to all)');
+            this.subtitle = _('Ready (:45103)');
+            this._statusItem.label.text = _(`Listening on unusual port ${PORT}`);
             this._transferItem.actor.hide();
         }
     }

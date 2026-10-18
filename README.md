@@ -1,62 +1,62 @@
-# Quick Share for GNOME Shell
+# Quick Share for GNOME Shell & Android
 
-Seamless Android **Quick Share** (formerly Nearby Share) integration right inside the **GNOME Shell Quick Settings** panel.
+A lightweight, standalone file-sharing server running on an unusual port (`45103`) paired with a native **GNOME Quick Settings Extension**.
 
-Transfer files, photos, and videos between your Android device and your Ubuntu / GNOME desktop with a single tap.
-
----
-
-## Features
-
-- **Quick Settings Toggle**: Toggle Quick Share visibility on or off directly from the GNOME status menu.
-- **Top Panel Status Indicator**: Shows an indicator icon in the top bar whenever Quick Share is active.
-- **Live Transfer Progress**: Displays real-time file transfer progress (`Receiving (45%)`) and device name.
-- **One-Click Folder Access**: Shortcut in the Quick Settings dropdown to open your received files folder (`~/Downloads`).
-- **GNOME 45 & 46+ Support**: Built with modern GJS and ES Modules (ESM).
+Allows instant, full-speed Wi-Fi file transfers directly between any Android phone and Ubuntu without relying on heavy external AppImages or third-party binaries.
 
 ---
 
-## Requirements
+## Architecture
 
-- **GNOME Shell**: 45, 46, or 47 (Ubuntu 23.10, 24.04 LTS, 24.10+)
-- **Backend Service**: [RQuickShare](https://github.com/Martichou/rquickshare) (installed at `~/.local/bin/r-quick-share.AppImage`)
-
----
-
-## Installation
-
-### Local Installation (Development)
-
-1. Clone or copy this repository to your GNOME extensions directory:
-   ```bash
-   mkdir -p ~/.local/share/gnome-shell/extensions/quickshare@niksanand1717.github.com
-   cp -r * ~/.local/share/gnome-shell/extensions/quickshare@niksanand1717.github.com/
-   ```
-
-2. Reload GNOME Shell:
-   - On **X11**: Press `Alt` + `F2`, type `r`, and press `Enter`.
-   - On **Wayland**: Log out and log back in.
-
-3. Enable the extension:
-   ```bash
-   gnome-extensions enable quickshare@niksanand1717.github.com
-   ```
+- **Standalone Server (`quickshare-server.py`)**:
+  - Pure Python 3 standard library with zero external dependencies.
+  - Listens on unusual port **`45103`**.
+  - **Dual-mode interface**:
+    - **Desktop**: Displays an embedded offline QR code with direct IP & `.local` mDNS links.
+    - **Mobile**: Responsive, dark-mode file uploader supporting multi-file, 4K videos, and large file streaming directly to `~/Downloads`.
+  - Live transfer tracking (`/status` endpoint) with real-time transfer speed (MB/s) and desktop notifications (`notify-send`).
+- **GNOME Shell Extension (`quickshare@niksanand1717.github.com`)**:
+  - Plugs natively into GNOME 45 & 46+ Quick Settings (top-right menu).
+  - Toggles the server on/off with one click.
+  - Live status indicator with upload progress (`Receiving 85% (32 MB/s)`).
+  - One-click access to QR code dashboard and received files.
 
 ---
 
-## Submitting to GNOME Extensions (`extensions.gnome.org`)
+## Quick Start
 
-1. Build the extension package:
-   ```bash
-   ./pack.sh
-   ```
-   This generates `quickshare@niksanand1717.github.com.shell-extension.zip`.
+### 1. Run Server Manually
+```bash
+python3 quickshare-server.py
+```
+Or use the installed command:
+```bash
+quickshare-server
+```
 
-2. Go to [https://extensions.gnome.org/upload/](https://extensions.gnome.org/upload/).
-3. Upload the `.shell-extension.zip` bundle and submit for review.
+Open `http://localhost:45103` in your browser to view the pairing QR code.
+
+### 2. Install & Enable GNOME Shell Extension
+```bash
+mkdir -p ~/.local/share/gnome-shell/extensions/quickshare@niksanand1717.github.com
+cp metadata.json extension.js stylesheet.css ~/.local/share/gnome-shell/extensions/quickshare@niksanand1717.github.com/
+```
+Reload GNOME Shell (`Alt` + `F2`, type `r`, press `Enter`), then enable:
+```bash
+gnome-extensions enable quickshare@niksanand1717.github.com
+```
+
+---
+
+## Packaging for GNOME Extensions (`extensions.gnome.org`)
+
+```bash
+./pack.sh
+```
+Upload `quickshare@niksanand1717.github.com.shell-extension.zip` directly to [extensions.gnome.org/upload/](https://extensions.gnome.org/upload/).
 
 ---
 
 ## License
 
-GNU General Public License v2.0 or later (GPL-2.0-or-later).
+GPL-2.0-or-later

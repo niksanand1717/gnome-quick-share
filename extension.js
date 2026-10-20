@@ -20,6 +20,8 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import { QuickMenuToggle, SystemIndicator } from 'resource:///org/gnome/shell/ui/quickSettings.js';
 
+Gio._promisify(Gio.File.prototype, 'load_contents_async', 'load_contents_finish');
+
 const DOWNLOADS_PATH = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DOWNLOAD) || `${GLib.get_home_dir()}/Downloads`;
 const STATUS_PATH = `${GLib.get_user_runtime_dir()}/quickshare.json`;
 
@@ -37,15 +39,15 @@ function findDaemonBinary(extensionPath) {
     return userLocal.get_path();
 }
 
-function isPidAlive(pid) {
+async function isPidAlive(pid) {
     if (!pid || pid <= 0) return false;
     try {
         const procDir = Gio.File.new_for_path(`/proc/${pid}`);
         if (!procDir.query_exists(null)) return false;
         const cmdFile = Gio.File.new_for_path(`/proc/${pid}/cmdline`);
         if (!cmdFile.query_exists(null)) return false;
-        const [ok, bytes] = cmdFile.load_contents(null);
-        if (!ok || !bytes) return false;
+        const [bytes] = await cmdFile.load_contents_async(null);
+        if (!bytes) return false;
         const cmd = new TextDecoder('utf-8').decode(bytes);
         return cmd.includes('quickshare-daemon') || cmd.includes('core_bin');
     } catch (e) {
@@ -136,7 +138,7 @@ class QuickShareToggle extends QuickMenuToggle {
             can_focus: false,
         });
         this._progressMenuItem.add_child(this._progressBox);
-        this._progressMenuItem.actor.hide();
+        this._progressMenuItem.hide();
         this.menu.addMenuItem(this._progressMenuItem);
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
@@ -190,13 +192,14 @@ class QuickShareToggle extends QuickMenuToggle {
         }
     }
 
-    _toggleService() {
+    async _toggleService() {
         if (this.checked) {
             this.subtitle = _('Starting...');
             this._launchDaemon();
         } else {
             this.subtitle = _('Stopping...');
-            this._stopDaemon();
+            await this._stopDaemon();
+            await this._syncState();
         }
     }
 
@@ -222,15 +225,23 @@ class QuickShareToggle extends QuickMenuToggle {
         }
     }
 
-    _stopDaemon() {
+    async _stopDaemon() {
         try {
             if (this._daemonProc) {
                 this._daemonProc.send_signal(15); // SIGTERM
                 this._daemonProc = null;
             } else {
-                const data = this._readStatusFile();
-                if (data && data.pid && isPidAlive(data.pid)) {
-                    GLib.spawn_command_line_async(`kill -15 ${data.pid}`);
+                const data = await this._readStatusFile();
+                if (data && data.pid && (await isPidAlive(data.pid))) {
+                    try {
+                        const proc = new Gio.Subprocess({
+                            argv: ['kill', '-15', `${data.pid}`],
+                            flags: Gio.SubprocessFlags.NONE,
+                        });
+                        proc.init(null);
+                    } catch (e) {
+                        console.error(`QuickShare: Error stopping daemon: ${e.message}`);
+                    }
                 }
             }
         } catch (e) {
@@ -238,12 +249,12 @@ class QuickShareToggle extends QuickMenuToggle {
         }
     }
 
-    _readStatusFile() {
+    async _readStatusFile() {
         try {
             const file = Gio.File.new_for_path(STATUS_PATH);
             if (!file.query_exists(null)) return null;
-            const [ok, bytes] = file.load_contents(null);
-            if (!ok || !bytes) return null;
+            const [bytes] = await file.load_contents_async(null);
+            if (!bytes) return null;
             const str = new TextDecoder('utf-8').decode(bytes).trim();
             if (!str) return null;
             return JSON.parse(str);
@@ -252,19 +263,19 @@ class QuickShareToggle extends QuickMenuToggle {
         }
     }
 
-    _isDaemonRunning(statusData) {
+    async _isDaemonRunning(statusData) {
         if (this._daemonProc) {
             return true;
         }
         if (statusData && statusData.pid) {
-            return isPidAlive(statusData.pid);
+            return await isPidAlive(statusData.pid);
         }
         return false;
     }
 
-    _syncState() {
-        const data = this._readStatusFile();
-        const isRunning = this._isDaemonRunning(data);
+    async _syncState() {
+        const data = await this._readStatusFile();
+        const isRunning = await this._isDaemonRunning(data);
 
         this.checked = isRunning;
         this._indicator.updateVisible(isRunning);
@@ -272,7 +283,7 @@ class QuickShareToggle extends QuickMenuToggle {
         if (!isRunning) {
             this.subtitle = _('Off');
             this._statusItem.label.text = _('Quick Share is turned off');
-            this._progressMenuItem.actor.hide();
+            this._progressMenuItem.hide();
             return;
         }
 
@@ -287,7 +298,7 @@ class QuickShareToggle extends QuickMenuToggle {
             this._detailsLabel.text = data.speed ? `${data.speed}` : '';
 
             this._updateFillBar(p);
-            this._progressMenuItem.actor.show();
+            this._progressMenuItem.show();
         } else if (data && data.state === 'finished' && data.last_file) {
             this.subtitle = _('Visible');
             this._statusItem.label.text = _('Ready for transfers (Visible to all)');
@@ -295,11 +306,11 @@ class QuickShareToggle extends QuickMenuToggle {
             this._percentLabel.text = '100%';
             this._detailsLabel.text = _('Saved to Downloads');
             this._updateFillBar(100);
-            this._progressMenuItem.actor.show();
+            this._progressMenuItem.show();
         } else {
             this.subtitle = _('Visible');
             this._statusItem.label.text = _('Ready for transfers (Visible to all)');
-            this._progressMenuItem.actor.hide();
+            this._progressMenuItem.hide();
         }
     }
 
@@ -315,6 +326,42 @@ class QuickShareToggle extends QuickMenuToggle {
             }
             this._dirMonitor.cancel();
             this._dirMonitor = null;
+        }
+        if (this._barFill) {
+            this._barFill.destroy();
+            this._barFill = null;
+        }
+        if (this._barBg) {
+            this._barBg.destroy();
+            this._barBg = null;
+        }
+        if (this._fileNameLabel) {
+            this._fileNameLabel.destroy();
+            this._fileNameLabel = null;
+        }
+        if (this._percentLabel) {
+            this._percentLabel.destroy();
+            this._percentLabel = null;
+        }
+        if (this._detailsLabel) {
+            this._detailsLabel.destroy();
+            this._detailsLabel = null;
+        }
+        if (this._progressBox) {
+            this._progressBox.destroy();
+            this._progressBox = null;
+        }
+        if (this._progressMenuItem) {
+            this._progressMenuItem.destroy();
+            this._progressMenuItem = null;
+        }
+        if (this._statusItem) {
+            this._statusItem.destroy();
+            this._statusItem = null;
+        }
+        if (this._statusSection) {
+            this._statusSection.destroy();
+            this._statusSection = null;
         }
         super.destroy();
     }
@@ -343,6 +390,10 @@ class QuickShareIndicator extends SystemIndicator {
         if (this.quickToggle) {
             this.quickToggle.destroy();
             this.quickToggle = null;
+        }
+        if (this._icon) {
+            this._icon.destroy();
+            this._icon = null;
         }
         super.destroy();
     }

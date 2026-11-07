@@ -118,7 +118,6 @@ async fn main() -> Result<(), anyhow::Error> {
                         last_ack = 0;
                         save_status(&st);
 
-                        // 1 single notification when transfer starts
                         let _ = Command::new("notify-send")
                             .args([
                                 "-i", "send-to-symbolic",
@@ -157,7 +156,6 @@ async fn main() -> Result<(), anyhow::Error> {
                         if !speed_str.is_empty() {
                             st.speed = speed_str;
                         }
-                        // Zero popups during transfer - pure RAM status for the UI progress bar!
                         save_status(&st);
                     }
                 }
@@ -169,7 +167,6 @@ async fn main() -> Result<(), anyhow::Error> {
                     st.last_file = last.clone();
                     save_status(&st);
 
-                    // 1 single notification when transfer completes
                     let _ = Command::new("notify-send")
                         .args([
                             "-i", "send-to-symbolic",
